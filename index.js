@@ -145,7 +145,7 @@ async function run() {
         line_items: [
           {
             price_data: {
-              currency: "bdt",
+              currency: "usd",
               unit_amount: amount,
               product_data: {
                 name: "please support us",
