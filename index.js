@@ -1,4 +1,4 @@
-const { MongoClient, ServerApiVersion } = require("mongodb");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
@@ -168,15 +168,15 @@ async function run() {
       res.send({ url: session.url });
     });
 
-    app.post('/payment-success', async(req, res)=>{
-      const {session_id} = req.query;
+    app.post("/payment-success", async (req, res) => {
+      const { session_id } = req.query;
       const session = await stripe.checkout.sessions.retrieve(session_id);
-      session_id
+      session_id;
       console.log(session);
 
       const transactionId = session.payment_intent;
 
-      if(session.payment_status === 'paid'){
+      if (session.payment_status === "paid") {
         const paymentInfo = {
           amount: session.amount_total / 100,
           currency: session.currency,
@@ -184,23 +184,33 @@ async function run() {
           donorName: session.metadata.donorName,
           transactionId: transactionId,
           createdAt: new Date(),
-        }
+        };
         const result = await paymentCollection.insertOne(paymentInfo);
         return res.send(result);
       }
-    })
-    
-  
+    });
 
     //donation request
 
+    // GET /donation-requests?blood_group=A+&district=Dhaka&upazila=Dhanmondi&status=pending
     app.get("/donation-requests", async (req, res) => {
-      const status = req.query.status;
+      try {
+        const { status, blood_group, district, upazila } = req.query;
 
-      const query = status ? { donation_status: status } : {};
+        const query = {};
 
-      const result = await requestCollection.find(query).toArray();
-      res.send(result);
+        if (status) query.donation_status = status;
+        if (blood_group) query.blood_group = blood_group;
+        if (district) query.district = district;
+        if (upazila) query.upazila = upazila;
+
+        const result = await requestCollection.find(query).toArray();
+
+        res.send(result);
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: "Failed to fetch donation requests" });
+      }
     });
 
     app.get("/donation-request/:id", verifyFBToken, async (req, res) => {
@@ -212,6 +222,8 @@ async function run() {
 
       res.send(result);
     });
+
+    // Public route for blood request search — NO AUTHENTICATION
 
     await client.db("admin").command({ ping: 1 });
     console.log(
