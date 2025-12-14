@@ -60,7 +60,8 @@ async function run() {
     const database = client.db("ph-11DB");
     const userCollection = database.collection("user");
     const requestCollection = database.collection("request");
-    const fundingCollection = database.collection("funding");
+    // const fundingCollection = database.collection("funding");
+    const paymentCollection = database.collection("payment");
     //users info
     app.post("/users", async (req, res) => {
       const userInfo = req.body;
@@ -166,6 +167,30 @@ async function run() {
 
       res.send({ url: session.url });
     });
+
+    app.post('/payment-success', async(req, res)=>{
+      const {session_id} = req.query;
+      const session = await stripe.checkout.sessions.retrieve(session_id);
+      session_id
+      console.log(session);
+
+      const transactionId = session.payment_intent;
+
+      if(session.payment_status === 'paid'){
+        const paymentInfo = {
+          amount: session.amount_total / 100,
+          currency: session.currency,
+          donorEmail: session.customer_email,
+          donorName: session.metadata.donorName,
+          transactionId: transactionId,
+          createdAt: new Date(),
+        }
+        const result = await paymentCollection.insertOne(paymentInfo);
+        return res.send(result);
+      }
+    })
+    
+  
 
     //donation request
 
