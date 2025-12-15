@@ -250,6 +250,42 @@ async function run() {
       }
     );
 
+    // Update donation status (donor can update from "inprogress" → "done" or "canceled")
+    app.patch(
+      "/donation-request/:id/update-status",
+      verifyFBToken,
+      async (req, res) => {
+        const { id } = req.params;
+        const { donation_status } = req.body;
+
+        // Only allow these transitions
+        if (!["done", "canceled"].includes(donation_status)) {
+          return res.status(400).send({ error: "Invalid status" });
+        }
+
+        try {
+          const result = await requestCollection.updateOne(
+            {
+              _id: new ObjectId(id),
+              donation_status: "inprogress", // only allow from inprogress
+            },
+            { $set: { donation_status, updatedAt: new Date() } }
+          );
+
+          if (result.matchedCount === 0) {
+            return res
+              .status(400)
+              .send({ error: "Can only update from 'inprogress'" });
+          }
+
+          res.send({ success: true });
+        } catch (error) {
+          console.error("Status update error:", error);
+          res.status(500).send({ error: "Failed to update status" });
+        }
+      }
+    );
+
     app.get("/donation-request/:id", verifyFBToken, async (req, res) => {
       const id = req.params.id;
 
