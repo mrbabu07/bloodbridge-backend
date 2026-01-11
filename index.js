@@ -16,6 +16,11 @@ const stripe = require("stripe")(stripeKey || "sk_test_placeholder");
 
 const app = express();
 
+// Test route registered BEFORE run()
+app.get("/test-before-run", (req, res) => {
+  res.send({ message: "Test before run working!" });
+});
+
 app.use(cors());
 app.use(express.json());
 
@@ -71,6 +76,15 @@ async function run() {
     const userCollection = database.collection("user");
     const requestCollection = database.collection("request");
     const paymentCollection = database.collection("payment");
+    const testimonialCollection = database.collection("testimonials");
+    const centersCollection = database.collection("donation_centers");
+    const contactCollection = database.collection("contacts");
+    const newsletterCollection = database.collection("newsletter");
+    const notificationCollection = database.collection("notifications");
+    const messageCollection = database.collection("messages");
+    const conversationCollection = database.collection("conversations");
+    const eventsCollection = database.collection("events");
+    const achievementsCollection = database.collection("achievements");
 
     // Middleware to check if demo admin (read-only)
     const checkDemoAdmin = async (req, res, next) => {
@@ -1071,7 +1085,6 @@ async function run() {
     });
 
     // ============ TESTIMONIALS ENDPOINT ============
-    const testimonialCollection = database.collection("testimonials");
 
     // Get all testimonials (public)
     app.get("/testimonials", async (req, res) => {
@@ -1256,7 +1269,6 @@ async function run() {
     });
 
     // ============ DONATION CENTERS ENDPOINT ============
-    const centersCollection = database.collection("donation_centers");
 
     app.get("/donation-centers", async (req, res) => {
       try {
@@ -1277,7 +1289,6 @@ async function run() {
     });
 
     // ============ CONTACT FORM ENDPOINT ============
-    const contactCollection = database.collection("contacts");
 
     app.post("/contact", async (req, res) => {
       try {
@@ -1352,7 +1363,6 @@ async function run() {
     });
 
     // ============ NEWSLETTER SUBSCRIPTION ============
-    const newsletterCollection = database.collection("newsletter");
 
     app.post("/newsletter/subscribe", async (req, res) => {
       try {
@@ -1554,7 +1564,6 @@ async function run() {
     });
 
     // ============ NOTIFICATIONS SYSTEM ============
-    const notificationCollection = database.collection("notifications");
 
     // Create notification helper function
     const createNotification = async (
@@ -1679,8 +1688,6 @@ async function run() {
     });
 
     // ============ MESSAGING SYSTEM ============
-    const messageCollection = database.collection("messages");
-    const conversationCollection = database.collection("conversations");
 
     // Start or get conversation
     app.post("/conversations", verifyToken, async (req, res) => {
@@ -1928,6 +1935,937 @@ async function run() {
       }
     });
 
+    // ============ ADVANCED DONOR SEARCH & FILTERING ============
+    console.log("Registering donor search endpoints...");
+
+    try {
+      // Test endpoint
+      console.log("About to register test-endpoint");
+      app.get("/test-endpoint", (req, res) => {
+        console.log("Test endpoint hit!");
+        res.send({ message: "Test endpoint working!" });
+      });
+      console.log("Test endpoint registered");
+
+      console.log("About to register donors/search");
+      app.get("/donors/search", async (req, res) => {
+        console.log("Donor search endpoint hit!");
+        try {
+          const {
+            bloodGroup,
+            district,
+            upazila,
+            page = 1,
+            limit = 10,
+            sortBy = "recent",
+          } = req.query;
+
+          const query = {
+            role: { $in: ["donor", "volunteer"] },
+            status: "active",
+          };
+
+          if (bloodGroup) query.bloodGroup = bloodGroup;
+          if (district) query.district = { $regex: district, $options: "i" };
+          if (upazila) query.upazila = { $regex: upazila, $options: "i" };
+
+          const skip = (parseInt(page) - 1) * parseInt(limit);
+
+          // Get donation counts for sorting
+          const donorsPipeline = [
+            { $match: query },
+            {
+              $lookup: {
+                from: "request",
+                let: { donorEmail: "$email" },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: { $eq: ["$donorEmail", "$$donorEmail"] },
+                      donation_status: "done",
+                    },
+                  },
+                ],
+                as: "donations",
+              },
+            },
+            {
+              $addFields: {
+                donationCount: { $size: "$donations" },
+                lastDonation: { $max: "$donations.updatedAt" },
+              },
+            },
+            {
+              $project: {
+                password: 0,
+                donations: 0,
+              },
+            },
+            {
+              $sort:
+                sortBy === "donations"
+                  ? { donationCount: -1 }
+                  : { createdAt: -1 },
+            },
+            { $skip: skip },
+            { $limit: parseInt(limit) },
+          ];
+
+          const donors = await userCollection
+            .aggregate(donorsPipeline)
+            .toArray();
+          const total = await userCollection.countDocuments(query);
+
+          res.send({
+            donors,
+            total,
+            page: parseInt(page),
+            pages: Math.ceil(total / parseInt(limit)),
+          });
+        } catch (error) {
+          console.error("Donor search error:", error);
+          res.status(500).send({ error: "Failed to search donors" });
+        }
+      });
+    } catch (error) {
+      console.error("Error registering donor search endpoints:", error);
+    }
+
+    // ============ DONATION ELIGIBILITY TRACKER ============
+    app.get("/donations/eligibility", verifyToken, async (req, res) => {
+      try {
+        const user = await userCollection.findOne({ email: req.decodedEmail });
+        if (!user) {
+          return res.status(404).send({ error: "User not found" });
+        }
+
+        // Get last donation
+        const lastDonation = await requestCollection.findOne(
+          { donorEmail: req.decodedEmail, donation_status: "done" },
+          { sort: { updatedAt: -1 } }
+        );
+
+        const ELIGIBILITY_DAYS = 90;
+        let isEligible = true;
+        let reason = "You are eligible to donate blood!";
+        let nextEligibleDate = null;
+        let daysSinceLastDonation = null;
+
+        if (lastDonation?.updatedAt) {
+          const lastDonationDate = new Date(lastDonation.updatedAt);
+          const today = new Date();
+          daysSinceLastDonation = Math.floor(
+            (today - lastDonationDate) / (1000 * 60 * 60 * 24)
+          );
+
+          if (daysSinceLastDonation < ELIGIBILITY_DAYS) {
+            isEligible = false;
+            nextEligibleDate = new Date(lastDonationDate);
+            nextEligibleDate.setDate(
+              nextEligibleDate.getDate() + ELIGIBILITY_DAYS
+            );
+            const daysRemaining = ELIGIBILITY_DAYS - daysSinceLastDonation;
+            reason = `You need to wait ${daysRemaining} more days before your next donation.`;
+          }
+        }
+
+        res.send({
+          isEligible,
+          reason,
+          lastDonationDate: lastDonation?.updatedAt || null,
+          nextEligibleDate,
+          daysSinceLastDonation,
+          eligibilityPeriodDays: ELIGIBILITY_DAYS,
+        });
+      } catch (error) {
+        console.error("Eligibility check error:", error);
+        res.status(500).send({ error: "Failed to check eligibility" });
+      }
+    });
+
+    app.get("/donations/history", verifyToken, async (req, res) => {
+      try {
+        const { page = 1, limit = 10 } = req.query;
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+
+        const donations = await requestCollection
+          .find({ donorEmail: req.decodedEmail, donation_status: "done" })
+          .sort({ updatedAt: -1 })
+          .skip(skip)
+          .limit(parseInt(limit))
+          .toArray();
+
+        const total = await requestCollection.countDocuments({
+          donorEmail: req.decodedEmail,
+          donation_status: "done",
+        });
+
+        const livesSaved = total * 3;
+
+        res.send({
+          donations,
+          total,
+          livesSaved,
+          page: parseInt(page),
+          pages: Math.ceil(total / parseInt(limit)),
+        });
+      } catch (error) {
+        console.error("Donation history error:", error);
+        res.status(500).send({ error: "Failed to fetch donation history" });
+      }
+    });
+
+    // ============ BLOOD DONATION EVENTS/CAMPS ============
+
+    // Create event (admin only)
+    app.post("/events", verifyToken, checkDemoAdmin, async (req, res) => {
+      try {
+        const adminUser = await userCollection.findOne({
+          email: req.decodedEmail,
+        });
+        if (adminUser?.role !== "admin") {
+          return res.status(403).send({ error: "Admin access required" });
+        }
+
+        const {
+          name,
+          description,
+          district,
+          upazila,
+          address,
+          date,
+          time,
+          capacity,
+          organizer,
+        } = req.body;
+
+        if (!name || !district || !date || !time) {
+          return res.status(400).send({ error: "Missing required fields" });
+        }
+
+        const event = {
+          name,
+          description: description || "",
+          district,
+          upazila: upazila || "",
+          address: address || "",
+          date: new Date(date),
+          time,
+          capacity: parseInt(capacity) || 100,
+          organizer: organizer || adminUser.name,
+          organizerEmail: req.decodedEmail,
+          registrations: [],
+          registrationCount: 0,
+          status: "upcoming",
+          createdAt: new Date(),
+        };
+
+        const result = await eventsCollection.insertOne(event);
+
+        // Notify donors in the district
+        const matchingDonors = await userCollection
+          .find({
+            district: { $regex: district, $options: "i" },
+            status: "active",
+            role: { $in: ["donor", "volunteer"] },
+          })
+          .limit(100)
+          .toArray();
+
+        for (const donor of matchingDonors) {
+          await createNotification(
+            donor._id,
+            donor.email,
+            "new_event",
+            "New Blood Donation Camp",
+            `A blood donation camp "${name}" is scheduled in ${district} on ${new Date(
+              date
+            ).toLocaleDateString()}`,
+            { eventId: result.insertedId }
+          );
+        }
+
+        res.status(201).send({
+          success: true,
+          eventId: result.insertedId,
+          notifiedDonors: matchingDonors.length,
+        });
+      } catch (error) {
+        console.error("Create event error:", error);
+        res.status(500).send({ error: "Failed to create event" });
+      }
+    });
+
+    // Get upcoming events (public)
+    app.get("/events/upcoming", async (req, res) => {
+      try {
+        const { district, page = 1, limit = 10 } = req.query;
+        const query = {
+          date: { $gte: new Date() },
+          status: { $ne: "cancelled" },
+        };
+
+        if (district) query.district = { $regex: district, $options: "i" };
+
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+
+        const events = await eventsCollection
+          .find(query)
+          .sort({ date: 1 })
+          .skip(skip)
+          .limit(parseInt(limit))
+          .toArray();
+
+        const total = await eventsCollection.countDocuments(query);
+
+        res.send({
+          events,
+          total,
+          page: parseInt(page),
+          pages: Math.ceil(total / parseInt(limit)),
+        });
+      } catch (error) {
+        console.error("Get events error:", error);
+        res.status(500).send({ error: "Failed to fetch events" });
+      }
+    });
+
+    // Get all events (admin)
+    app.get("/events", verifyToken, async (req, res) => {
+      try {
+        const { status, page = 1, limit = 10 } = req.query;
+        const query = {};
+        if (status) query.status = status;
+
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+
+        const events = await eventsCollection
+          .find(query)
+          .sort({ date: -1 })
+          .skip(skip)
+          .limit(parseInt(limit))
+          .toArray();
+
+        const total = await eventsCollection.countDocuments(query);
+
+        res.send({
+          events,
+          total,
+          page: parseInt(page),
+          pages: Math.ceil(total / parseInt(limit)),
+        });
+      } catch (error) {
+        console.error("Get all events error:", error);
+        res.status(500).send({ error: "Failed to fetch events" });
+      }
+    });
+
+    // Register for event
+    app.post("/events/:id/register", verifyToken, async (req, res) => {
+      try {
+        const eventId = req.params.id;
+        const user = await userCollection.findOne({ email: req.decodedEmail });
+
+        if (!user) {
+          return res.status(404).send({ error: "User not found" });
+        }
+
+        const event = await eventsCollection.findOne({
+          _id: new ObjectId(eventId),
+        });
+
+        if (!event) {
+          return res.status(404).send({ error: "Event not found" });
+        }
+
+        if (event.status === "cancelled") {
+          return res.status(400).send({ error: "Event has been cancelled" });
+        }
+
+        if (event.registrationCount >= event.capacity) {
+          return res.status(400).send({ error: "Event is at full capacity" });
+        }
+
+        // Check if already registered
+        if (event.registrations?.some((r) => r.email === req.decodedEmail)) {
+          return res
+            .status(400)
+            .send({ error: "Already registered for this event" });
+        }
+
+        const registration = {
+          email: req.decodedEmail,
+          name: user.name,
+          bloodGroup: user.bloodGroup,
+          registeredAt: new Date(),
+        };
+
+        await eventsCollection.updateOne(
+          { _id: new ObjectId(eventId) },
+          {
+            $push: { registrations: registration },
+            $inc: { registrationCount: 1 },
+          }
+        );
+
+        // Send confirmation notification
+        await createNotification(
+          user._id,
+          user.email,
+          "event_registration",
+          "Event Registration Confirmed",
+          `You have successfully registered for "${event.name}" on ${new Date(
+            event.date
+          ).toLocaleDateString()}`,
+          { eventId: event._id }
+        );
+
+        res.send({ success: true, message: "Successfully registered" });
+      } catch (error) {
+        console.error("Event registration error:", error);
+        res.status(500).send({ error: "Failed to register for event" });
+      }
+    });
+
+    // Get event attendees (admin only)
+    app.get("/events/:id/attendees", verifyToken, async (req, res) => {
+      try {
+        const adminUser = await userCollection.findOne({
+          email: req.decodedEmail,
+        });
+        if (adminUser?.role !== "admin") {
+          return res.status(403).send({ error: "Admin access required" });
+        }
+
+        const event = await eventsCollection.findOne({
+          _id: new ObjectId(req.params.id),
+        });
+
+        if (!event) {
+          return res.status(404).send({ error: "Event not found" });
+        }
+
+        res.send({
+          eventName: event.name,
+          date: event.date,
+          attendees: event.registrations || [],
+          totalRegistered: event.registrationCount || 0,
+          capacity: event.capacity,
+        });
+      } catch (error) {
+        console.error("Get attendees error:", error);
+        res.status(500).send({ error: "Failed to fetch attendees" });
+      }
+    });
+
+    // Cancel event (admin only)
+    app.patch(
+      "/events/:id/cancel",
+      verifyToken,
+      checkDemoAdmin,
+      async (req, res) => {
+        try {
+          const adminUser = await userCollection.findOne({
+            email: req.decodedEmail,
+          });
+          if (adminUser?.role !== "admin") {
+            return res.status(403).send({ error: "Admin access required" });
+          }
+
+          const event = await eventsCollection.findOne({
+            _id: new ObjectId(req.params.id),
+          });
+
+          if (!event) {
+            return res.status(404).send({ error: "Event not found" });
+          }
+
+          await eventsCollection.updateOne(
+            { _id: new ObjectId(req.params.id) },
+            { $set: { status: "cancelled", cancelledAt: new Date() } }
+          );
+
+          // Notify all registered attendees
+          for (const attendee of event.registrations || []) {
+            await createNotification(
+              null,
+              attendee.email,
+              "event_cancelled",
+              "Event Cancelled",
+              `The event "${event.name}" scheduled for ${new Date(
+                event.date
+              ).toLocaleDateString()} has been cancelled.`,
+              { eventId: event._id }
+            );
+          }
+
+          res.send({
+            success: true,
+            notifiedAttendees: event.registrations?.length || 0,
+          });
+        } catch (error) {
+          console.error("Cancel event error:", error);
+          res.status(500).send({ error: "Failed to cancel event" });
+        }
+      }
+    );
+
+    // ============ EMERGENCY ALERT SYSTEM ============
+    // Mark request as emergency
+    app.patch("/requests/:id/mark-emergency", verifyToken, async (req, res) => {
+      try {
+        const { priority = "high" } = req.body;
+        const requestId = req.params.id;
+
+        const request = await requestCollection.findOne({
+          _id: new ObjectId(requestId),
+        });
+
+        if (!request) {
+          return res.status(404).send({ error: "Request not found" });
+        }
+
+        // Only requester or admin can mark as emergency
+        const user = await userCollection.findOne({
+          email: req.decodedEmail,
+        });
+        if (
+          request.requesterEmail !== req.decodedEmail &&
+          user?.role !== "admin"
+        ) {
+          return res.status(403).send({ error: "Not authorized" });
+        }
+
+        await requestCollection.updateOne(
+          { _id: new ObjectId(requestId) },
+          {
+            $set: {
+              isEmergency: true,
+              priority: ["normal", "high", "critical"].includes(priority)
+                ? priority
+                : "high",
+              emergencyMarkedAt: new Date(),
+            },
+          }
+        );
+
+        // Notify matching donors
+        const matchingDonors = await userCollection
+          .find({
+            bloodGroup: request.blood_group,
+            status: "active",
+            role: { $in: ["donor", "volunteer"] },
+            email: { $ne: request.requesterEmail },
+          })
+          .limit(100)
+          .toArray();
+
+        const notifiedEmails = [];
+        for (const donor of matchingDonors) {
+          await createNotification(
+            donor._id,
+            donor.email,
+            "emergency_request",
+            "🚨 EMERGENCY Blood Request",
+            `URGENT: ${request.blood_group} blood needed in ${request.district}. This is a ${priority} priority emergency!`,
+            { requestId: request._id, bloodGroup: request.blood_group }
+          );
+          notifiedEmails.push(donor.email);
+        }
+
+        // Store notified donors
+        await requestCollection.updateOne(
+          { _id: new ObjectId(requestId) },
+          { $set: { notifiedDonors: notifiedEmails } }
+        );
+
+        res.send({
+          success: true,
+          message: "Request marked as emergency",
+          notifiedDonors: notifiedEmails.length,
+        });
+      } catch (error) {
+        console.error("Mark emergency error:", error);
+        res.status(500).send({ error: "Failed to mark as emergency" });
+      }
+    });
+
+    // Emergency broadcast (admin only)
+    app.post(
+      "/emergency-broadcast",
+      verifyToken,
+      checkDemoAdmin,
+      async (req, res) => {
+        try {
+          const adminUser = await userCollection.findOne({
+            email: req.decodedEmail,
+          });
+          if (adminUser?.role !== "admin") {
+            return res.status(403).send({ error: "Admin access required" });
+          }
+
+          const { bloodGroup, district, message, title } = req.body;
+
+          if (!bloodGroup || !message) {
+            return res
+              .status(400)
+              .send({ error: "Blood group and message are required" });
+          }
+
+          const query = {
+            status: "active",
+            role: { $in: ["donor", "volunteer"] },
+            bloodGroup,
+          };
+
+          if (district) query.district = { $regex: district, $options: "i" };
+
+          const matchingDonors = await userCollection
+            .find(query)
+            .limit(200)
+            .toArray();
+
+          const notifiedEmails = [];
+          for (const donor of matchingDonors) {
+            await createNotification(
+              donor._id,
+              donor.email,
+              "emergency_broadcast",
+              title || "🚨 Emergency Blood Alert",
+              message,
+              { bloodGroup, district }
+            );
+            notifiedEmails.push(donor.email);
+          }
+
+          res.send({
+            success: true,
+            message: "Emergency broadcast sent",
+            notifiedDonors: notifiedEmails.length,
+            recipients: notifiedEmails,
+          });
+        } catch (error) {
+          console.error("Emergency broadcast error:", error);
+          res.status(500).send({ error: "Failed to send broadcast" });
+        }
+      }
+    );
+
+    // Get emergency requests (public)
+    app.get("/requests/emergency", async (req, res) => {
+      try {
+        const { page = 1, limit = 10 } = req.query;
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+
+        const requests = await requestCollection
+          .find({
+            isEmergency: true,
+            donation_status: "pending",
+          })
+          .sort({ emergencyMarkedAt: -1, createdAt: -1 })
+          .skip(skip)
+          .limit(parseInt(limit))
+          .toArray();
+
+        const total = await requestCollection.countDocuments({
+          isEmergency: true,
+          donation_status: "pending",
+        });
+
+        res.send({
+          requests,
+          total,
+          page: parseInt(page),
+          pages: Math.ceil(total / parseInt(limit)),
+        });
+      } catch (error) {
+        console.error("Get emergency requests error:", error);
+        res.status(500).send({ error: "Failed to fetch emergency requests" });
+      }
+    });
+
+    // ============ ACHIEVEMENTS & GAMIFICATION ============
+
+    const BADGES = {
+      FIRST_DROP: {
+        id: "first_drop",
+        name: "First Drop",
+        description: "Completed your first blood donation",
+        icon: "🩸",
+        requirement: 1,
+      },
+      REGULAR_DONOR: {
+        id: "regular_donor",
+        name: "Regular Donor",
+        description: "Completed 5 blood donations",
+        icon: "⭐",
+        requirement: 5,
+      },
+      HERO: {
+        id: "hero",
+        name: "Hero",
+        description: "Completed 10 blood donations",
+        icon: "🦸",
+        requirement: 10,
+      },
+      LEGEND: {
+        id: "legend",
+        name: "Legend",
+        description: "Completed 25 blood donations",
+        icon: "🏆",
+        requirement: 25,
+      },
+      LIFESAVER: {
+        id: "lifesaver",
+        name: "Lifesaver",
+        description: "Completed 50 blood donations",
+        icon: "💎",
+        requirement: 50,
+      },
+      COMMUNITY_BUILDER: {
+        id: "community_builder",
+        name: "Community Builder",
+        description: "Referred 5 new donors",
+        icon: "🤝",
+        requirement: 5,
+      },
+      EVENT_ENTHUSIAST: {
+        id: "event_enthusiast",
+        name: "Event Enthusiast",
+        description: "Attended 3 blood donation events",
+        icon: "🎪",
+        requirement: 3,
+      },
+    };
+
+    // Get user achievements
+    app.get("/achievements", verifyToken, async (req, res) => {
+      try {
+        const user = await userCollection.findOne({ email: req.decodedEmail });
+        if (!user) {
+          return res.status(404).send({ error: "User not found" });
+        }
+
+        // Get donation count
+        const donationCount = await requestCollection.countDocuments({
+          donorEmail: req.decodedEmail,
+          donation_status: "done",
+        });
+
+        // Get event attendance count
+        const eventAttendance = await eventsCollection.countDocuments({
+          "registrations.email": req.decodedEmail,
+          status: { $ne: "cancelled" },
+        });
+
+        // Get or create achievements record
+        let achievements = await achievementsCollection.findOne({
+          userEmail: req.decodedEmail,
+        });
+
+        if (!achievements) {
+          achievements = {
+            userEmail: req.decodedEmail,
+            badges: [],
+            points: 0,
+            donationCount: 0,
+            eventsAttended: 0,
+            createdAt: new Date(),
+          };
+          await achievementsCollection.insertOne(achievements);
+        }
+
+        // Calculate earned badges
+        const earnedBadges = [];
+        const availableBadges = [];
+
+        // Donation badges
+        if (donationCount >= 1)
+          earnedBadges.push({ ...BADGES.FIRST_DROP, earnedAt: new Date() });
+        else availableBadges.push(BADGES.FIRST_DROP);
+
+        if (donationCount >= 5)
+          earnedBadges.push({ ...BADGES.REGULAR_DONOR, earnedAt: new Date() });
+        else availableBadges.push(BADGES.REGULAR_DONOR);
+
+        if (donationCount >= 10)
+          earnedBadges.push({ ...BADGES.HERO, earnedAt: new Date() });
+        else availableBadges.push(BADGES.HERO);
+
+        if (donationCount >= 25)
+          earnedBadges.push({ ...BADGES.LEGEND, earnedAt: new Date() });
+        else availableBadges.push(BADGES.LEGEND);
+
+        if (donationCount >= 50)
+          earnedBadges.push({ ...BADGES.LIFESAVER, earnedAt: new Date() });
+        else availableBadges.push(BADGES.LIFESAVER);
+
+        // Event badge
+        if (eventAttendance >= 3)
+          earnedBadges.push({
+            ...BADGES.EVENT_ENTHUSIAST,
+            earnedAt: new Date(),
+          });
+        else availableBadges.push(BADGES.EVENT_ENTHUSIAST);
+
+        // Calculate points
+        const points = donationCount * 100 + eventAttendance * 25;
+
+        // Update achievements
+        await achievementsCollection.updateOne(
+          { userEmail: req.decodedEmail },
+          {
+            $set: {
+              badges: earnedBadges.map((b) => b.id),
+              points,
+              donationCount,
+              eventsAttended: eventAttendance,
+              updatedAt: new Date(),
+            },
+          }
+        );
+
+        res.send({
+          earnedBadges,
+          availableBadges,
+          points,
+          stats: {
+            donationCount,
+            eventsAttended: eventAttendance,
+            livesSaved: donationCount * 3,
+          },
+        });
+      } catch (error) {
+        console.error("Get achievements error:", error);
+        res.status(500).send({ error: "Failed to fetch achievements" });
+      }
+    });
+
+    // Get points breakdown
+    app.get("/points", verifyToken, async (req, res) => {
+      try {
+        const donationCount = await requestCollection.countDocuments({
+          donorEmail: req.decodedEmail,
+          donation_status: "done",
+        });
+
+        const eventAttendance = await eventsCollection.countDocuments({
+          "registrations.email": req.decodedEmail,
+          status: { $ne: "cancelled" },
+        });
+
+        const breakdown = {
+          donations: { count: donationCount, points: donationCount * 100 },
+          events: { count: eventAttendance, points: eventAttendance * 25 },
+          total: donationCount * 100 + eventAttendance * 25,
+        };
+
+        res.send(breakdown);
+      } catch (error) {
+        console.error("Get points error:", error);
+        res.status(500).send({ error: "Failed to fetch points" });
+      }
+    });
+
+    // Get milestones progress
+    app.get("/milestones", verifyToken, async (req, res) => {
+      try {
+        const donationCount = await requestCollection.countDocuments({
+          donorEmail: req.decodedEmail,
+          donation_status: "done",
+        });
+
+        const milestones = [
+          { level: "Bronze", requirement: 1, badge: "🥉" },
+          { level: "Silver", requirement: 5, badge: "🥈" },
+          { level: "Gold", requirement: 10, badge: "🥇" },
+          { level: "Platinum", requirement: 25, badge: "💎" },
+          { level: "Diamond", requirement: 50, badge: "👑" },
+        ];
+
+        let currentLevel = null;
+        let nextLevel = milestones[0];
+        let progress = 0;
+
+        for (let i = 0; i < milestones.length; i++) {
+          if (donationCount >= milestones[i].requirement) {
+            currentLevel = milestones[i];
+            nextLevel = milestones[i + 1] || null;
+          }
+        }
+
+        if (nextLevel) {
+          const prevRequirement = currentLevel?.requirement || 0;
+          progress =
+            ((donationCount - prevRequirement) /
+              (nextLevel.requirement - prevRequirement)) *
+            100;
+        } else {
+          progress = 100;
+        }
+
+        res.send({
+          currentLevel,
+          nextLevel,
+          donationCount,
+          progress: Math.min(100, Math.round(progress)),
+          donationsToNextLevel: nextLevel
+            ? nextLevel.requirement - donationCount
+            : 0,
+        });
+      } catch (error) {
+        console.error("Get milestones error:", error);
+        res.status(500).send({ error: "Failed to fetch milestones" });
+      }
+    });
+
+    // Achievements leaderboard
+    app.get("/achievements/leaderboard", async (req, res) => {
+      try {
+        const { limit = 10 } = req.query;
+
+        const leaderboard = await achievementsCollection
+          .aggregate([
+            { $sort: { points: -1 } },
+            { $limit: parseInt(limit) },
+            {
+              $lookup: {
+                from: "user",
+                localField: "userEmail",
+                foreignField: "email",
+                as: "userInfo",
+              },
+            },
+            {
+              $unwind: { path: "$userInfo", preserveNullAndEmptyArrays: true },
+            },
+            {
+              $project: {
+                email: "$userEmail",
+                points: 1,
+                donationCount: 1,
+                badges: 1,
+                name: "$userInfo.name",
+                avatar: "$userInfo.photoURL",
+                bloodGroup: "$userInfo.bloodGroup",
+              },
+            },
+          ])
+          .toArray();
+
+        const rankedLeaderboard = leaderboard.map((user, idx) => ({
+          ...user,
+          rank: idx + 1,
+          livesSaved: (user.donationCount || 0) * 3,
+        }));
+
+        res.send(rankedLeaderboard);
+      } catch (error) {
+        console.error("Achievements leaderboard error:", error);
+        res.status(500).send({ error: "Failed to fetch leaderboard" });
+      }
+    });
+
     // ============ TRIGGER NOTIFICATIONS ON EVENTS ============
 
     // Send notification when blood request is created (use this endpoint for notifications)
@@ -1971,16 +2909,24 @@ async function run() {
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!"
     );
+
+    // Root route
+    app.get("/", (req, res) => {
+      res.send("Hello World!");
+    });
+
+    // Test endpoint right before listen
+    app.get("/test-final", (req, res) => {
+      res.send({ message: "Test final working!" });
+    });
+
+    // Start server AFTER all routes are registered
+    app.listen(port, () => {
+      console.log(`Server is running on port ${port}`);
+    });
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
   }
 }
 run().catch(console.dir);
-
-app.get("/", (req, res) => {
-  res.send("Hello World!");
-});
-app.listen(port, () => {
-  console.log(`Server is running on port ${port}`);
-});
