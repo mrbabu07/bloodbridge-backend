@@ -1,0 +1,14 @@
+# Git attributes for security scanning
+
+# Mark .env files as binary to prevent accidental commits
+.env binary
+.env.local binary
+.env.*.local binary
+
+# Mark sensitive files
+*.pem binary
+*.key binary
+*.p12 binary
+*.pfx binary
+*.json filter=lfs diff=lfs merge=lfs -text
+ph-11.json binary

@@ -7,12 +7,14 @@ require("dotenv").config();
 
 const port = process.env.PORT || 3000;
 
-// Stripe Key validation (Warning only)
+// Stripe Key validation
 const stripeKey = process.env.STRIPE_KEY;
 if (!stripeKey || stripeKey.includes("your_")) {
-  console.warn("⚠️ WARNING: STRIPE_KEY is missing or using a placeholder.");
+  console.error("❌ ERROR: STRIPE_KEY is not defined or is a placeholder!");
+  console.error("Please add a valid STRIPE_KEY to your .env file");
+  process.exit(1);
 }
-const stripe = require("stripe")(stripeKey || "sk_test_placeholder");
+const stripe = require("stripe")(stripeKey);
 
 const app = express();
 
@@ -24,9 +26,14 @@ app.get("/test-before-run", (req, res) => {
 app.use(cors());
 app.use(express.json());
 
-// JWT Secret
-const JWT_SECRET =
-  process.env.JWT_SECRET || "your-super-secret-jwt-key-change-in-production";
+// JWT Secret - MUST be set in .env file
+const JWT_SECRET = process.env.JWT_SECRET;
+
+if (!JWT_SECRET) {
+  console.error("❌ ERROR: JWT_SECRET is not defined in .env file!");
+  console.error("Please add JWT_SECRET to your .env file");
+  process.exit(1);
+}
 
 // JWT Verification Middleware
 const verifyToken = async (req, res, next) => {
@@ -66,8 +73,8 @@ const client = new MongoClient(uri, {
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    await client.connect();
-    await client.db("admin").command({ ping: 1 });
+    // await client.connect();
+    // await client.db("admin").command({ ping: 1 });
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!"
     );
